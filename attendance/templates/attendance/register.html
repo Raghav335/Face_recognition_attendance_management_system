@@ -25,4 +25,27 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const roleInputs = document.querySelectorAll('input[name="role"]');
+    const teacherFields = document.querySelectorAll('.teacher-field');
+    
+    function toggleTeacherFields() {
+        const selectedRole = document.querySelector('input[name="role"]:checked').value;
+        teacherFields.forEach(field => {
+            field.style.display = selectedRole === 'teacher' ? 'block' : 'none';
+        });
+    }
+    
+    roleInputs.forEach(input => {
+        input.addEventListener('change', toggleTeacherFields);
+    });
+    
+    // Initial toggle
+    toggleTeacherFields();
+});
+</script>
 {% endblock %} 

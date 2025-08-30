@@ -20,7 +20,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib.auth import views as auth_views
 from attendance import views
-from attendance.views import CustomLoginView
+from attendance.views import CustomLoginView, CustomLogoutView
 
 # Override admin password reset URLs
 admin.site.password_reset = views.request_password_reset
@@ -42,7 +42,7 @@ urlpatterns = [
     # Authentication URLs
     path('', CustomLoginView.as_view(), name='login'),
     path('accounts/login/', CustomLoginView.as_view(), name='login'),
-    path('accounts/logout/', auth_views.LogoutView.as_view(), name='logout'),
+    path('accounts/logout/', CustomLogoutView.as_view(), name='logout'),
     
     # Main app URLs
     path('', include('attendance.urls')),

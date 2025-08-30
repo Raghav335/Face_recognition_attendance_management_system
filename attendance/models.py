@@ -62,7 +62,11 @@ def create_user_profile(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=User)
 def save_user_profile(sender, instance, **kwargs):
-    instance.profile.save()
+    try:
+        instance.profile.save()
+    except Profile.DoesNotExist:
+        # If profile doesn't exist, create it
+        Profile.objects.create(user=instance)
 
 @receiver(post_save, sender=Profile)
 def create_teacher_for_profile(sender, instance, created, **kwargs):
@@ -71,3 +75,9 @@ def create_teacher_for_profile(sender, instance, created, **kwargs):
         from .models import Teacher
         if not hasattr(instance, 'teacher'):
             Teacher.objects.create(profile=instance, department='', designation='')
+
+# Ensure all existing users have profiles
+def ensure_user_profiles():
+    """Create profiles for users that don't have them"""
+    for user in User.objects.all():
+        Profile.objects.get_or_create(user=user)

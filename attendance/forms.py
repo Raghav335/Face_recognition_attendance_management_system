@@ -15,10 +15,28 @@ class UserRegisterForm(UserCreationForm):
         label="Register as",
         required=True
     )
+    
+    # Teacher-specific fields
+    department = forms.CharField(max_length=100, required=False, label="Department")
+    designation = forms.CharField(max_length=100, required=False, label="Designation")
 
     class Meta:
         model = User
-        fields = ['username', 'email', 'password1', 'password2', 'role']
+        fields = ['username', 'email', 'password1', 'password2', 'role', 'department', 'designation']
+
+    def clean(self):
+        cleaned_data = super().clean()
+        role = cleaned_data.get('role')
+        department = cleaned_data.get('department')
+        designation = cleaned_data.get('designation')
+
+        if role == 'teacher':
+            if not department:
+                raise forms.ValidationError("Department is required for teachers")
+            if not designation:
+                raise forms.ValidationError("Designation is required for teachers")
+
+        return cleaned_data
 
     def save(self, commit=True):
         user = super().save(commit=True)
@@ -31,6 +49,12 @@ class UserRegisterForm(UserCreationForm):
             profile.is_student = True
         elif role == 'teacher':
             profile.is_teacher = True
+            # Create teacher profile with department and designation
+            Teacher.objects.create(
+                profile=profile,
+                department=self.cleaned_data.get('department'),
+                designation=self.cleaned_data.get('designation')
+            )
         profile.save()
         return user
 

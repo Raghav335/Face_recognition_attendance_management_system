@@ -11,6 +11,8 @@ import numpy as np
 from datetime import datetime
 import os
 from django.contrib.auth import logout, authenticate, login
+from django.contrib.auth.views import LogoutView
+from django.contrib.messages.storage import default_storage
 from django.core.mail import send_mail
 from django.contrib.auth.models import User
 import random
@@ -22,14 +24,13 @@ def register(request):
     if request.method == 'POST':
         form = UserRegisterForm(request.POST)
         if form.is_valid():
-            user = form.save()
-            messages.success(request, f'Account created for {user.username}!')
-            
-            # Redirect based on role
-            if user.profile.is_student:
-                return redirect('student-profile')
-            elif user.profile.is_teacher:
-                return redirect('teacher-profile')
+            try:
+                user = form.save()
+                messages.success(request, f'Account created for {user.username}! Please log in.')
+                logout(request)  # This will clear any existing session
+                return redirect('login')  # Always redirect to login after registration
+            except Exception as e:
+                messages.error(request, f'Error creating account: {str(e)}')
     else:
         form = UserRegisterForm()
     return render(request, 'attendance/register.html', {'form': form})
@@ -122,6 +123,7 @@ def mark_attendance(request):
         for profile in Profile.objects.filter(face_encoding__isnull=False, is_student=True):
             known_face_encodings.append(np.frombuffer(profile.face_encoding, dtype=np.float64))
             known_face_names.append(profile.user.username)
+        print(f"Loaded {len(known_face_encodings)} known face encodings.")
         
         while True:
             ret, frame = video_capture.read()
@@ -139,11 +141,14 @@ def mark_attendance(request):
                 if True in matches:
                     first_match_index = matches.index(True)
                     name = known_face_names[first_match_index]
-                    
+                    print(f"Recognized: {name}")
                     # Mark attendance for the recognized student if department matches
                     try:
                         student = Student.objects.get(profile__user__username=name)
                         teacher = Teacher.objects.get(profile=request.user.profile)
+                        print(f"Student department: {student.department}")
+                        print(f"Teacher department: {teacher.department}")
+                        
                         if student.department == teacher.department:
                             attendance, created = Attendance.objects.get_or_create(
                                 student=student,
@@ -158,9 +163,17 @@ def mark_attendance(request):
                             if not created and not attendance.status:
                                 attendance.status = True
                                 attendance.save()
-                    except (Student.DoesNotExist, Teacher.DoesNotExist):
-                        pass
-                
+                                print(f"Attendance updated for {name}")
+                            elif created:
+                                print(f"Attendance created for {name}")
+                            else:
+                                print(f"Attendance already marked for {name}")
+                        else:
+                            print(f"Department mismatch: {student.department} != {teacher.department}")
+                    except (Student.DoesNotExist, Teacher.DoesNotExist) as e:
+                        print(f"Error: {e}")
+                else:
+                    print("No match found for detected face.")
                 # Draw rectangle around the face
                 cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
                 cv2.putText(frame, name, (left + 6, bottom - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -172,6 +185,32 @@ def mark_attendance(request):
         
         video_capture.release()
         cv2.destroyAllWindows()
+
+        # Mark absentees: for all students in the teacher's department, if no attendance for today, mark absent
+        today = datetime.now().date()
+        teacher = Teacher.objects.get(profile=request.user.profile)
+        students = Student.objects.filter(department=teacher.department)
+        print(f"Marking absentees for department: {teacher.department}")
+        print(f"Total students in department: {students.count()}")
+        
+        for student in students:
+            exists = Attendance.objects.filter(
+                student=student,
+                date=today,
+                marked_by=teacher
+            ).exists()
+            if not exists:
+                Attendance.objects.create(
+                    student=student,
+                    date=today,
+                    time=datetime.now().time(),
+                    status=False,  # Absent
+                    marked_by=teacher
+                )
+                print(f"Marked absent: {student}")
+            else:
+                print(f"Attendance already exists for {student}")
+
         return redirect('dashboard')
     
     return render(request, 'attendance/mark_attendance.html')
@@ -191,9 +230,50 @@ class AttendanceListView(LoginRequiredMixin, ListView):
 @login_required
 def dashboard(request):
     if request.user.profile.is_teacher:
-        # For teachers, show all recent attendances
-        recent_attendances = Attendance.objects.all().order_by('-date', '-time')[:10]
-        return render(request, 'attendance/teacher_dashboard.html', {'recent_attendances': recent_attendances})
+        try:
+            teacher = Teacher.objects.get(profile=request.user.profile)
+            
+            # Get students in teacher's department
+            students = Student.objects.filter(department=teacher.department)
+            total_students = students.count()
+            
+            # Get today's attendance data
+            today = datetime.now().date()
+            today_present = Attendance.objects.filter(
+                student__department=teacher.department,
+                date=today,
+                status=True,
+                marked_by=teacher
+            ).count()
+            today_absent = Attendance.objects.filter(
+                student__department=teacher.department,
+                date=today,
+                status=False,
+                marked_by=teacher
+            ).count()
+            
+            # Calculate today's attendance rate
+            today_total = today_present + today_absent
+            attendance_rate = round((today_present / today_total * 100) if today_total > 0 else 0, 1)
+            
+            # Get recent attendances
+            recent_attendances = Attendance.objects.filter(
+                marked_by=teacher
+            ).order_by('-date', '-time')[:10]
+            
+            context = {
+                'recent_attendances': recent_attendances,
+                'total_students': total_students,
+                'today_present': today_present,
+                'today_absent': today_absent,
+                'attendance_rate': attendance_rate,
+            }
+            
+            return render(request, 'attendance/teacher_dashboard.html', context)
+            
+        except Teacher.DoesNotExist:
+            messages.error(request, 'Teacher profile not found!')
+            return redirect('teacher-profile')
     elif request.user.profile.is_student:
         try:
             # Get student object
@@ -227,6 +307,23 @@ def dashboard(request):
 
 class CustomLoginView(LoginView):
     template_name = 'registration/login.html'
+
+    def dispatch(self, request, *args, **kwargs):
+        # Clear any existing messages when accessing login page
+        storage = messages.get_messages(request)
+        storage.used = True  # Mark all messages as used
+        
+        # Clear messages from session completely
+        if 'messages' in request.session:
+            del request.session['messages']
+        
+        # Also clear any other message-related session data
+        session_keys = list(request.session.keys())
+        for key in session_keys:
+            if 'messages' in key.lower():
+                del request.session[key]
+        
+        return super().dispatch(request, *args, **kwargs)
 
     def form_invalid(self, form):
         messages.error(self.request, "Invalid username or password. Please try again.")
@@ -292,23 +389,30 @@ def request_password_reset(request):
                 return render(request, 'registration/password_reset_form.html')
             try:
                 profile = user.profile
-                if not (profile.is_student or profile.is_teacher):
-                    messages.error(request, 'This account is not properly set up. Please contact support.')
-                    return render(request, 'registration/password_reset_form.html')
+                # Allow password reset for any user with a valid email
+                # Profile completion status is not required for password reset
                 otp = generate_otp()
                 PasswordResetOTP.objects.filter(user=user, is_used=False).delete()
                 otp_obj = PasswordResetOTP.objects.create(user=user, otp=otp)
                 try:
+                    # Use a default sender email for console backend
+                    from_email = settings.EMAIL_HOST_USER if settings.EMAIL_HOST_USER else 'noreply@example.com'
                     send_mail(
                         'Password Reset OTP - Face Recognition Attendance',
                         f'Your OTP for password reset is: {otp}\n\nThis OTP is valid for 10 minutes.',
-                        settings.EMAIL_HOST_USER,
+                        from_email,
                         [email],
                         fail_silently=False,
                     )
                     request.session['reset_email'] = email
                     request.session['otp_sent'] = True
-                    messages.success(request, 'An OTP has been sent to your email.')
+                    
+                    # Check if profile is complete and provide helpful message
+                    if not (profile.is_student or profile.is_teacher):
+                        messages.warning(request, 'Password reset initiated. After logging in, please complete your profile setup.')
+                    else:
+                        messages.success(request, 'An OTP has been sent to your email.')
+                    
                     return redirect('verify_otp')
                 except Exception as e:
                     messages.error(request, f'Failed to send OTP email: {str(e)}')
@@ -340,11 +444,16 @@ def verify_otp(request):
             return redirect('password_reset')
             
         try:
-            user = User.objects.filter(email=email).first()
-            if not user:
+            # Get ALL users with this email (in case of duplicates)
+            users_with_email = User.objects.filter(email=email)
+            if not users_with_email.exists():
                 messages.error(request, 'No user found for this email.')
                 return redirect('verify_otp')
+            
+
             try:
+                # Get the first user for OTP verification (OTP is tied to a specific user)
+                user = users_with_email.first()
                 otp_obj = PasswordResetOTP.objects.filter(
                     user=user,
                     otp=otp,
@@ -355,16 +464,21 @@ def verify_otp(request):
                 return redirect('verify_otp')
 
             if otp_obj.is_valid():
-                # Set new password
-                user.set_password(new_password)
-                user.save()
+                # Update password for ALL users with this email
+                for user_with_email in users_with_email:
+                    user_with_email.set_password(new_password)
+                    user_with_email.save()
+                
                 # Mark OTP as used
                 otp_obj.is_used = True
                 otp_obj.save()
+                
                 # Clear session
                 del request.session['reset_email']
                 del request.session['otp_sent']
-                messages.success(request, 'Your password has been reset successfully.')
+                
+                messages.success(request, 'Your password has been reset successfully. You can now login with your new password.')
+                
                 return redirect('login')
             else:
                 messages.error(request, 'Invalid or expired OTP. Please request a new one.')
@@ -374,3 +488,139 @@ def verify_otp(request):
             return redirect('verify_otp')
     
     return render(request, 'registration/verify_otp.html', {'email': reset_email})
+
+@login_required
+def update_teacher_department(request):
+    if not request.user.profile.is_teacher:
+        return redirect('dashboard')
+    
+    try:
+        teacher = Teacher.objects.get(profile=request.user.profile)
+        if request.method == 'POST':
+            department = request.POST.get('department')
+            if department:
+                teacher.department = department
+                teacher.save()
+                messages.success(request, 'Department updated successfully!')
+                return redirect('dashboard')
+            else:
+                messages.error(request, 'Department cannot be empty!')
+        return render(request, 'attendance/update_teacher_department.html', {'teacher': teacher})
+    except Teacher.DoesNotExist:
+        messages.error(request, 'Teacher profile not found!')
+        return redirect('dashboard')
+
+@login_required
+def teacher_statistics(request):
+    if not request.user.profile.is_teacher:
+        return redirect('dashboard')
+    
+    try:
+        teacher = Teacher.objects.get(profile=request.user.profile)
+        
+        # Get students in teacher's department
+        students = Student.objects.filter(department=teacher.department)
+        
+        # Get attendance data for the last 30 days
+        from datetime import datetime, timedelta
+        end_date = datetime.now().date()
+        start_date = end_date - timedelta(days=30)
+        
+        # Daily attendance data - ONLY for this specific teacher
+        daily_data = []
+        current_date = start_date
+        while current_date <= end_date:
+            present_count = Attendance.objects.filter(
+                student__department=teacher.department,
+                date=current_date,
+                status=True,
+                marked_by=teacher  # Only count attendance marked by this teacher
+            ).count()
+            absent_count = Attendance.objects.filter(
+                student__department=teacher.department,
+                date=current_date,
+                status=False,
+                marked_by=teacher  # Only count attendance marked by this teacher
+            ).count()
+            
+            daily_data.append({
+                'date': current_date.strftime('%Y-%m-%d'),
+                'present': present_count,
+                'absent': absent_count,
+                'total': present_count + absent_count
+            })
+            current_date += timedelta(days=1)
+        
+        # Student-wise attendance data
+        student_data = []
+        for student in students:
+            total_attendance = Attendance.objects.filter(
+                student=student,
+                marked_by=teacher
+            ).count()
+            present_count = Attendance.objects.filter(
+                student=student,
+                marked_by=teacher,
+                status=True
+            ).count()
+            attendance_percentage = (present_count / total_attendance * 100) if total_attendance > 0 else 0
+            
+            student_data.append({
+                'name': student.profile.user.username,
+                'roll_number': student.roll_number,
+                'total': total_attendance,
+                'present': present_count,
+                'absent': total_attendance - present_count,
+                'percentage': round(attendance_percentage, 1)
+            })
+        
+        # Department summary
+        total_students = students.count()
+        total_attendance_records = Attendance.objects.filter(
+            student__department=teacher.department,
+            marked_by=teacher
+        ).count()
+        total_present = Attendance.objects.filter(
+            student__department=teacher.department,
+            marked_by=teacher,
+            status=True
+        ).count()
+        overall_attendance_percentage = (total_present / total_attendance_records * 100) if total_attendance_records > 0 else 0
+        
+        context = {
+            'teacher': teacher,
+            'daily_data': daily_data,
+            'student_data': student_data,
+            'total_students': total_students,
+            'total_attendance_records': total_attendance_records,
+            'total_present': total_present,
+            'total_absent': total_attendance_records - total_present,
+            'overall_attendance_percentage': round(overall_attendance_percentage, 1)
+        }
+        
+        return render(request, 'attendance/teacher_statistics.html', context)
+        
+    except Teacher.DoesNotExist:
+        messages.error(request, 'Teacher profile not found!')
+        return redirect('dashboard')
+
+
+class CustomLogoutView(LogoutView):
+    """Custom logout view that clears all messages"""
+    
+    def dispatch(self, request, *args, **kwargs):
+        # Clear all messages before logout
+        storage = messages.get_messages(request)
+        storage.used = True  # Mark all messages as used
+        
+        # Clear messages from session completely
+        if 'messages' in request.session:
+            del request.session['messages']
+        
+        # Also clear any other message-related session data
+        session_keys = list(request.session.keys())
+        for key in session_keys:
+            if 'messages' in key.lower():
+                del request.session[key]
+        
+        return super().dispatch(request, *args, **kwargs)
