@@ -55,8 +55,7 @@ Smart-Attendance-System/
 
 1️⃣ Clone the Repository
 
-git clone https://Tharun9113/Face_recognition_attendance_management_system.git
-cd Smart-Attendance-FaceRecognition-Django
+git clone https://github.com/Tharun9113/Face_recognition_attendance_management_system
 
 2️⃣ Create Virtual Environment
 
